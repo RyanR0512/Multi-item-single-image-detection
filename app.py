@@ -235,11 +235,13 @@ st.markdown("""
 # ============================================================
 # CONFIG
 # ============================================================
-YOLO_HF_URL = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11_detector.pt"
+YOLO_HF_URL       = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11_detector.pt"
+CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/flux_classifier.pt"
+
 YOLO_MODEL_PATH = "yolo11n.pt"
-AI_MODEL_PATH = "flux_classifier.pt"
-IMG_SIZE = 224
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+AI_MODEL_PATH   = "flux_classifier.pt"
+IMG_SIZE        = 224
+DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================
 # TRANSFORMS
@@ -275,9 +277,9 @@ def noise_residual(img_rgb):
 class NanoBananaDetector(nn.Module):
     def __init__(self):
         super().__init__()
-        self.rgb_net = timm.create_model("convnext_base", pretrained=False, num_classes=0)
-        self.fft_net = timm.create_model("resnet18", pretrained=False, num_classes=0)
-        self.noise_net = timm.create_model("resnet18", pretrained=False, num_classes=0)
+        self.rgb_net   = timm.create_model("convnext_base", pretrained=False, num_classes=0)
+        self.fft_net   = timm.create_model("resnet18",      pretrained=False, num_classes=0)
+        self.noise_net = timm.create_model("resnet18",      pretrained=False, num_classes=0)
         self.classifier = nn.Sequential(
             nn.Linear(1024 + 512 + 512, 512),
             nn.ReLU(),
@@ -293,6 +295,30 @@ class NanoBananaDetector(nn.Module):
         return self.classifier(feats).squeeze(1)
 
 # ============================================================
+# HELPERS
+# ============================================================
+def download_from_hf(url: str, dest_path: str, label: str):
+    """Download a file from HuggingFace with a Streamlit progress bar."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, stream=True, headers=headers, allow_redirects=True)
+    if r.status_code != 200:
+        st.error(f"Failed to download {label} (HTTP {r.status_code}). Check the URL.")
+        st.stop()
+    total      = int(r.headers.get("content-length", 0))
+    downloaded = 0
+    progress   = st.progress(0, text=f"Downloading {label}…")
+    with open(dest_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=8192):
+            f.write(chunk)
+            downloaded += len(chunk)
+            if total:
+                progress.progress(
+                    min(downloaded / total, 1.0),
+                    text=f"Downloading {label}… {downloaded/1e6:.1f} MB"
+                )
+    progress.empty()
+
+# ============================================================
 # CACHED MODEL LOADERS
 # ============================================================
 @st.cache_resource(show_spinner=False)
@@ -300,27 +326,14 @@ def load_yolo_model():
     from ultralytics import YOLO
     if not os.path.exists(YOLO_MODEL_PATH):
         with st.spinner("Downloading YOLO11 model from HuggingFace…"):
-            headers = {"User-Agent": "Mozilla/5.0"}
-            r = requests.get(YOLO_HF_URL, stream=True, headers=headers, allow_redirects=True)
-            if r.status_code != 200:
-                st.error(f"Failed to download YOLO model (HTTP {r.status_code}). Check the URL.")
-                st.stop()
-            total = int(r.headers.get("content-length", 0))
-            downloaded = 0
-            progress = st.progress(0, text="Downloading YOLO11…")
-            with open(YOLO_MODEL_PATH, "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if total:
-                        progress.progress(min(downloaded / total, 1.0), text=f"Downloading YOLO11… {downloaded/1e6:.1f} MB")
-            progress.empty()
+            download_from_hf(YOLO_HF_URL, YOLO_MODEL_PATH, "YOLO11")
     return YOLO(YOLO_MODEL_PATH)
 
 @st.cache_resource(show_spinner=False)
 def load_ai_detector():
     if not os.path.exists(AI_MODEL_PATH):
-        return None
+        with st.spinner("Downloading Flux Classifier from HuggingFace…"):
+            download_from_hf(CLASSIFIER_HF_URL, AI_MODEL_PATH, "Flux Classifier")
     model = NanoBananaDetector().to(DEVICE)
     model.load_state_dict(torch.load(AI_MODEL_PATH, map_location=DEVICE))
     model.eval()
@@ -332,7 +345,7 @@ def load_ai_detector():
 def detect_ai(crop_bgr, ai_model):
     img_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
     img_pil = Image.fromarray(img_rgb)
-    img_np = np.array(img_pil)
+    img_np  = np.array(img_pil)
 
     rgb   = rgb_transform(img_pil).unsqueeze(0).to(DEVICE)
     fft   = fft_features(img_np).unsqueeze(0).to(DEVICE)
@@ -352,8 +365,8 @@ def run_detection(img_pil, conf_threshold=0.25):
     ai_model   = load_ai_detector()
 
     # Convert PIL -> BGR numpy
-    img_rgb = np.array(img_pil.convert("RGB"))
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    img_rgb     = np.array(img_pil.convert("RGB"))
+    img_bgr     = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
     img_resized = cv2.resize(img_bgr, (640, 640))
 
     results = yolo_model(img_resized, conf=conf_threshold, verbose=False)[0]
@@ -365,11 +378,11 @@ def run_detection(img_pil, conf_threshold=0.25):
         class_id   = int(box.cls[0])
         class_name = yolo_model.names.get(class_id, f"Class {class_id}")
         detections_list.append({
-            "index": i,
-            "bbox": [x1, y1, x2, y2],
-            "class_id": class_id,
+            "index":      i,
+            "bbox":       [x1, y1, x2, y2],
+            "class_id":   class_id,
             "class_name": class_name,
-            "score": score,
+            "score":      score,
         })
 
     zip_buffer = io.BytesIO()
@@ -386,7 +399,7 @@ def run_detection(img_pil, conf_threshold=0.25):
 
             # ZIP crop
             ok, buffer = cv2.imencode(".jpg", crop)
-            zip_name = f"crop_{det['index']}_{det['class_name']}_{int(det['score']*100)}.jpg"
+            zip_name   = f"crop_{det['index']}_{det['class_name']}_{int(det['score']*100)}.jpg"
             zipf.writestr(zip_name, buffer.tobytes())
             det["zip_name"] = zip_name
 
@@ -394,12 +407,7 @@ def run_detection(img_pil, conf_threshold=0.25):
             det["crop_img"] = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
 
             # AI detection
-            if ai_model is not None:
-                ai_result = detect_ai(crop, ai_model)
-            else:
-                # Fallback: random-ish mock if no model weights found
-                ai_result = {"score": 0.0, "ai_like": False}
-
+            ai_result       = detect_ai(crop, ai_model)
             det["ai_score"] = ai_result["score"]
             det["ai_like"]  = ai_result["ai_like"]
 
@@ -449,9 +457,6 @@ with st.sidebar:
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     device_label = "🖥 GPU (CUDA)" if DEVICE == "cuda" else "💻 CPU"
     st.markdown(f'<div style="color:#555; font-size:0.75rem; font-family: monospace;">Running on: {device_label}</div>', unsafe_allow_html=True)
-
-    if not os.path.exists(AI_MODEL_PATH):
-        st.warning(f"⚠ `{AI_MODEL_PATH}` not found.\nPlace it in the app directory to enable AI detection.")
 
 # --- Main Columns ---
 col_left, col_right = st.columns([1, 1.35], gap="large")
