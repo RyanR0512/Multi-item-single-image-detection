@@ -1,8 +1,9 @@
-streamlit
 torch
 torchvision
+torchaudio
 timm
-numpy
-Pillow
-requests
 ultralytics
+streamlit
+pillow
+numpy
+requests
