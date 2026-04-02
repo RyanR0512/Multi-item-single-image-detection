@@ -1,6 +1,5 @@
 import os
 import io
-import cv2
 import torch
 import timm
 import numpy as np
@@ -8,15 +7,15 @@ import zipfile
 import requests
 import torch.nn as nn
 from torchvision import transforms
-from PIL import Image
+from PIL import Image, ImageFilter, ImageDraw
 
 # ============================================================
 # CONFIG
 # ============================================================
-YOLO_HF_URL   = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11_detector.pt"
+YOLO_HF_URL     = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11_detector.pt"
 YOLO_MODEL_PATH = "yolo11_detector.pt"
-IMG_SIZE      = 224
-DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
+IMG_SIZE        = 224
+DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================
 # TRANSFORMS
@@ -28,27 +27,78 @@ rgb_transform = transforms.Compose([
 ])
 
 # ============================================================
-# FEATURE FUNCTIONS
+# CV2 REPLACEMENTS (Pillow + numpy only)
 # ============================================================
-def fft_features(img_rgb):
-    gray   = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+
+def pil_resize(img_np, w, h):
+    """Resize a numpy array (H,W,C) or (H,W) to (h, w) using Pillow."""
+    if img_np.ndim == 2:
+        pil = Image.fromarray(img_np.astype(np.float32))
+        pil = pil.resize((w, h), Image.BILINEAR)
+        return np.array(pil)
+    else:
+        pil = Image.fromarray(img_np.astype(np.uint8))
+        pil = pil.resize((w, h), Image.BILINEAR)
+        return np.array(pil)
+
+
+def rgb_to_gray(img_rgb_np):
+    """Convert RGB numpy array to grayscale using luminance weights."""
+    return (
+        0.299 * img_rgb_np[:, :, 0]
+        + 0.587 * img_rgb_np[:, :, 1]
+        + 0.114 * img_rgb_np[:, :, 2]
+    ).astype(np.float32)
+
+
+def gaussian_blur(img_rgb_np, radius=2):
+    """Apply Gaussian blur to an RGB numpy array using Pillow."""
+    pil     = Image.fromarray(img_rgb_np.astype(np.uint8))
+    blurred = pil.filter(ImageFilter.GaussianBlur(radius=radius))
+    return np.array(blurred).astype(np.float32)
+
+
+def draw_box_and_label(img_pil, x1, y1, x2, y2, label, color):
+    """Draw bounding box and label onto a PIL image in-place."""
+    draw   = ImageDraw.Draw(img_pil)
+    draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
+    text_y = max(y1 - 16, 0)
+    draw.text((x1, text_y), label, fill=color)
+
+
+def encode_jpg(img_pil):
+    """Encode a PIL image to JPEG bytes."""
+    buf = io.BytesIO()
+    img_pil.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
+
+# ============================================================
+# FEATURE FUNCTIONS (no cv2)
+# ============================================================
+
+def fft_features(img_rgb_np):
+    """Compute FFT magnitude spectrum from an RGB numpy array."""
+    gray   = rgb_to_gray(img_rgb_np)
     f      = np.fft.fft2(gray)
     fshift = np.fft.fftshift(f)
     mag    = np.log(np.abs(fshift) + 1.0)
-    mag    = cv2.resize(mag, (IMG_SIZE, IMG_SIZE))
+    mag    = pil_resize(mag, IMG_SIZE, IMG_SIZE)
     mag    = np.repeat(mag[np.newaxis, ...], 3, axis=0)
     return torch.tensor(mag, dtype=torch.float32)
 
-def noise_residual(img_rgb):
-    blur     = cv2.GaussianBlur(img_rgb, (5, 5), 0)
-    residual = img_rgb.astype(np.float32) - blur.astype(np.float32)
-    residual = cv2.resize(residual, (IMG_SIZE, IMG_SIZE))
+
+def noise_residual(img_rgb_np):
+    """Compute noise residual (image minus Gaussian blur)."""
+    blur     = gaussian_blur(img_rgb_np, radius=2)
+    residual = img_rgb_np.astype(np.float32) - blur
+    residual = pil_resize(residual.astype(np.uint8), IMG_SIZE, IMG_SIZE)
     residual = torch.tensor(residual).permute(2, 0, 1) / 255.0
     return residual.float()
 
 # ============================================================
 # MODEL ARCHITECTURE
 # ============================================================
+
 class NanoBananaDetector(nn.Module):
     def __init__(self):
         super().__init__()
@@ -72,6 +122,7 @@ class NanoBananaDetector(nn.Module):
 # ============================================================
 # MODEL LOADERS
 # ============================================================
+
 def download_yolo_if_needed(progress_callback=None):
     """Download YOLO model from HuggingFace if not present locally."""
     if os.path.exists(YOLO_MODEL_PATH):
@@ -79,7 +130,7 @@ def download_yolo_if_needed(progress_callback=None):
     headers    = {"User-Agent": "Mozilla/5.0"}
     r          = requests.get(YOLO_HF_URL, stream=True, headers=headers, allow_redirects=True)
     if r.status_code != 200:
-        raise RuntimeError(f"Failed to download YOLO model (HTTP {r.status_code}). Check the URL.")
+        raise RuntimeError(f"Failed to download YOLO model (HTTP {r.status_code}).")
     total      = int(r.headers.get("content-length", 0))
     downloaded = 0
     with open(YOLO_MODEL_PATH, "wb") as f:
@@ -97,7 +148,7 @@ def load_yolo_model():
 
 
 def load_ai_detector(model_path):
-    """Load NanoBananaDetector from an uploaded .pt file path. Returns None if path invalid."""
+    """Load NanoBananaDetector weights. Returns None if path invalid."""
     if not model_path or not os.path.exists(model_path):
         return None
     model = NanoBananaDetector().to(DEVICE)
@@ -108,12 +159,12 @@ def load_ai_detector(model_path):
 # ============================================================
 # AI DETECTION ON A SINGLE CROP
 # ============================================================
-def detect_ai(crop_bgr, ai_model):
-    img_rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(img_rgb)
-    img_np  = np.array(img_pil)
 
-    rgb   = rgb_transform(img_pil).unsqueeze(0).to(DEVICE)
+def detect_ai(crop_pil, ai_model):
+    """Run AI classifier on a PIL crop. Returns score and ai_like flag."""
+    img_np = np.array(crop_pil.convert("RGB"))
+
+    rgb   = rgb_transform(crop_pil).unsqueeze(0).to(DEVICE)
     fft   = fft_features(img_np).unsqueeze(0).to(DEVICE)
     noise = noise_residual(img_np).unsqueeze(0).to(DEVICE)
 
@@ -126,28 +177,29 @@ def detect_ai(crop_bgr, ai_model):
 # ============================================================
 # MAIN PIPELINE
 # ============================================================
+
 def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
     """
     Run YOLO detection + AI classification on a PIL image.
 
     Args:
-        img_pil         : PIL.Image  — the uploaded image
-        yolo_model      : loaded YOLO model (from load_yolo_model)
-        ai_model        : loaded NanoBananaDetector or None
-        conf_threshold  : float — YOLO confidence cutoff
+        img_pil        : PIL.Image  — the uploaded image
+        yolo_model     : loaded YOLO model (from load_yolo_model)
+        ai_model       : loaded NanoBananaDetector or None
+        conf_threshold : float — YOLO confidence cutoff
 
     Returns:
         detections_list : list of dicts with keys:
                           index, bbox, class_id, class_name, score,
                           ai_score, ai_like, crop_img, zip_name
         annotated_pil   : PIL.Image — annotated result image
-        zip_buffer      : BytesIO  — ZIP of cropped detections
+        zip_buffer      : BytesIO   — ZIP of cropped detections
     """
-    img_rgb     = np.array(img_pil.convert("RGB"))
-    img_bgr     = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    img_resized = cv2.resize(img_bgr, (640, 640))
+    # Resize to 640x640 for YOLO using Pillow
+    img_resized = img_pil.convert("RGB").resize((640, 640), Image.BILINEAR)
+    img_np      = np.array(img_resized)
 
-    results = yolo_model(img_resized, conf=conf_threshold, verbose=False)[0]
+    results = yolo_model(img_np, conf=conf_threshold, verbose=False)[0]
 
     detections_list = []
     for i, box in enumerate(results.boxes):
@@ -163,43 +215,45 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
             "score":      score,
         })
 
+    # Pillow copy for annotation
+    annotated_pil = img_resized.copy()
+
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w") as zipf:
         for det in detections_list:
             x1, y1, x2, y2 = det["bbox"]
-            crop = img_resized[max(y1, 0):y2, max(x1, 0):x2]
 
-            if crop.size == 0:
+            # Crop using Pillow
+            crop_pil = img_resized.crop((
+                max(x1, 0), max(y1, 0),
+                min(x2, 640), min(y2, 640)
+            ))
+
+            if crop_pil.width == 0 or crop_pil.height == 0:
                 det["ai_score"] = 0.0
                 det["ai_like"]  = False
                 det["crop_img"] = None
                 continue
 
             # Save crop to ZIP
-            ok, buffer = cv2.imencode(".jpg", crop)
-            zip_name   = f"crop_{det['index']}_{det['class_name']}_{int(det['score']*100)}.jpg"
-            zipf.writestr(zip_name, buffer.tobytes())
+            zip_name = f"crop_{det['index']}_{det['class_name']}_{int(det['score']*100)}.jpg"
+            zipf.writestr(zip_name, encode_jpg(crop_pil))
             det["zip_name"] = zip_name
-
-            # Store crop as RGB PIL for display
-            det["crop_img"] = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            det["crop_img"] = crop_pil
 
             # AI detection
             if ai_model is not None:
-                ai_result = detect_ai(crop, ai_model)
+                ai_result = detect_ai(crop_pil, ai_model)
             else:
                 ai_result = {"score": 0.0, "ai_like": False}
 
             det["ai_score"] = ai_result["score"]
             det["ai_like"]  = ai_result["ai_like"]
 
-            # Annotate image
-            color = (0, 0, 255) if ai_result["ai_like"] else (0, 255, 0)
-            cv2.rectangle(img_resized, (x1, y1), (x2, y2), color, 2)
+            # Annotate with Pillow
+            color = "#ff4444" if ai_result["ai_like"] else "#44cc88"
             label = f"{det['class_name']} {det['score']:.2f} | AI:{det['ai_score']:.2f}"
-            cv2.putText(img_resized, label, (x1, max(y1 - 10, 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+            draw_box_and_label(annotated_pil, x1, y1, x2, y2, label, color)
 
-    annotated_pil = Image.fromarray(cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB))
     zip_buffer.seek(0)
     return detections_list, annotated_pil, zip_buffer
