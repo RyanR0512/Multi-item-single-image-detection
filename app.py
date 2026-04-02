@@ -1,7 +1,7 @@
 import os
 import streamlit as st
 from PIL import Image
-import Detection
+import detection
 
 # ============================================================
 # PAGE CONFIG
