@@ -1,4 +1,3 @@
-import os
 import streamlit as st
 from PIL import Image
 import detection
@@ -33,7 +32,6 @@ st.markdown("""
     .hero-title span { color: #f5c542; }
     .hero-sub { font-size: 1rem; color: #888; margin-top: 0.4rem; font-weight: 300; letter-spacing: 0.5px; }
 
-    .card { background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
     .card-title {
         font-family: 'Space Mono', monospace; font-size: 0.75rem;
         letter-spacing: 2px; text-transform: uppercase; color: #f5c542; margin-bottom: 1rem;
@@ -44,20 +42,20 @@ st.markdown("""
         padding: 0.75rem 1rem; border-radius: 8px; margin-bottom: 0.5rem;
         border: 1px solid #2a2a2a; background: #111;
     }
-    .det-row.ai  { border-left: 3px solid #ff4444; }
+    .det-row.ai   { border-left: 3px solid #ff4444; }
     .det-row.real { border-left: 3px solid #44cc88; }
-    .det-label { font-family: 'Space Mono', monospace; font-size: 0.85rem; font-weight: 700; color: #f0ede6; }
-    .det-badge { font-family: 'Space Mono', monospace; font-size: 0.7rem; padding: 3px 10px; border-radius: 20px; font-weight: 700; letter-spacing: 1px; }
+    .det-label  { font-family: 'Space Mono', monospace; font-size: 0.85rem; font-weight: 700; color: #f0ede6; }
+    .det-badge  { font-family: 'Space Mono', monospace; font-size: 0.7rem; padding: 3px 10px; border-radius: 20px; font-weight: 700; letter-spacing: 1px; }
     .badge-ai   { background: rgba(255,68,68,0.15); color: #ff6666; border: 1px solid #ff4444; }
     .badge-real { background: rgba(68,204,136,0.15); color: #44cc88; border: 1px solid #44cc88; }
     .det-scores { font-size: 0.75rem; color: #666; font-family: 'Space Mono', monospace; }
 
-    .score-bar-wrap { width: 80px; height: 4px; background: #2a2a2a; border-radius: 2px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 8px; }
+    .score-bar-wrap      { width: 80px; height: 4px; background: #2a2a2a; border-radius: 2px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 8px; }
     .score-bar-fill-ai   { height: 100%; background: #ff4444; border-radius: 2px; }
     .score-bar-fill-real { height: 100%; background: #44cc88; border-radius: 2px; }
 
     .stat-grid { display: flex; gap: 0.75rem; margin-bottom: 1rem; }
-    .stat-box { flex: 1; background: #111; border: 1px solid #2a2a2a; border-radius: 10px; padding: 1rem; text-align: center; }
+    .stat-box  { flex: 1; background: #111; border: 1px solid #2a2a2a; border-radius: 10px; padding: 1rem; text-align: center; }
     .stat-num  { font-family: 'Space Mono', monospace; font-size: 2rem; font-weight: 700; color: #f5c542; line-height: 1; }
     .stat-label { font-size: 0.7rem; color: #666; letter-spacing: 1.5px; text-transform: uppercase; margin-top: 0.3rem; }
     .stat-box.ai-box   .stat-num { color: #ff4444; }
@@ -82,20 +80,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# CACHED MODEL LOADERS (live here so st.cache_resource works)
+# CACHED MODEL LOADERS
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def get_yolo_model():
-    progress_bar = st.progress(0, text="Downloading YOLO11 model…")
+    bar = st.progress(0, text="Downloading YOLO11 model…")
     def cb(frac, mb):
-        progress_bar.progress(frac, text=f"Downloading YOLO11… {mb:.1f} MB")
-    detection.download_yolo_if_needed(progress_callback=cb)
-    progress_bar.empty()
-    return detection.load_yolo_model()
+        bar.progress(frac, text=f"Downloading YOLO11… {mb:.1f} MB")
+    model = detection.load_yolo_model(progress_callback=cb)
+    bar.empty()
+    return model
 
 @st.cache_resource(show_spinner=False)
-def get_ai_model(model_path):
-    return detection.load_ai_detector(model_path)
+def get_ai_model():
+    bar = st.progress(0, text="Downloading Flux Classifier…")
+    def cb(frac, mb):
+        bar.progress(frac, text=f"Downloading Classifier… {mb:.1f} MB")
+    model = detection.load_ai_detector(progress_callback=cb)
+    bar.empty()
+    return model
 
 # ============================================================
 # HERO HEADER
@@ -112,32 +115,11 @@ st.markdown("""
 # ============================================================
 with st.sidebar:
     st.markdown('<div class="card-title">⚙ Settings</div>', unsafe_allow_html=True)
-
     conf_threshold = st.slider(
         "Confidence Threshold",
         min_value=0.05, max_value=0.95, value=0.25, step=0.05,
         help="Minimum YOLO detection confidence to include a result."
     )
-
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    st.markdown('<div class="card-title">🧠 AI Classifier Model</div>', unsafe_allow_html=True)
-
-    # --- User uploads the classifier weights (like the TFLite app) ---
-    uploaded_model = st.file_uploader(
-        "Upload flux_classifier.pt",
-        type=["pt"],
-        help="Upload your NanoBananaDetector weights (.pt file)."
-    )
-
-    ai_model_path = None
-    if uploaded_model is not None:
-        ai_model_path = "temp_classifier.pt"
-        with open(ai_model_path, "wb") as f:
-            f.write(uploaded_model.read())
-        st.success(f"✅ Classifier loaded: {uploaded_model.name}")
-    else:
-        st.info("ℹ Upload a `.pt` classifier to enable AI detection.\nYOLO detection still works without it.")
-
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div class="card-title">ℹ About</div>', unsafe_allow_html=True)
     st.markdown("""
@@ -149,7 +131,6 @@ with st.sidebar:
     🟢 Green box = likely real
     </div>
     """, unsafe_allow_html=True)
-
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     device_label = "🖥 GPU (CUDA)" if detection.DEVICE == "cuda" else "💻 CPU"
     st.markdown(f'<div style="color:#555; font-size:0.75rem; font-family:monospace;">Running on: {device_label}</div>', unsafe_allow_html=True)
@@ -178,10 +159,9 @@ with col_left:
 with col_right:
     if uploaded_file and run_btn:
         try:
-            with st.spinner("Loading YOLO model…"):
+            with st.spinner("Loading models…"):
                 yolo_model = get_yolo_model()
-
-            ai_model = get_ai_model(ai_model_path) if ai_model_path else None
+                ai_model   = get_ai_model()
 
             with st.spinner("Running detection pipeline…"):
                 detections, annotated_img, zip_buf = detection.run_detection(
