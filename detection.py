@@ -12,10 +12,12 @@ from PIL import Image, ImageFilter, ImageDraw
 # ============================================================
 # CONFIG
 # ============================================================
-YOLO_HF_URL     = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11_detector.pt"
-YOLO_MODEL_PATH = "yolo11_detector.pt"
-IMG_SIZE        = 224
-DEVICE          = "cuda" if torch.cuda.is_available() else "cpu"
+YOLO_HF_URL       = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11_detector.pt"
+CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/flux_classifier.pt"
+YOLO_MODEL_PATH   = "yolo11_detector.pt"
+AI_MODEL_PATH     = "flux_classifier.pt"
+IMG_SIZE          = 224
+DEVICE            = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================
 # TRANSFORMS
@@ -120,39 +122,41 @@ class NanoBananaDetector(nn.Module):
         return self.classifier(feats).squeeze(1)
 
 # ============================================================
-# MODEL LOADERS
+# DOWNLOAD HELPER
 # ============================================================
 
-def download_yolo_if_needed(progress_callback=None):
-    """Download YOLO model from HuggingFace if not present locally."""
-    if os.path.exists(YOLO_MODEL_PATH):
+def download_from_hf(url, dest_path, label, progress_callback=None):
+    """Download a model from HuggingFace if not already present."""
+    if os.path.exists(dest_path):
         return
     headers    = {"User-Agent": "Mozilla/5.0"}
-    r          = requests.get(YOLO_HF_URL, stream=True, headers=headers, allow_redirects=True)
+    r          = requests.get(url, stream=True, headers=headers, allow_redirects=True)
     if r.status_code != 200:
-        raise RuntimeError(f"Failed to download YOLO model (HTTP {r.status_code}).")
+        raise RuntimeError(f"Failed to download {label} (HTTP {r.status_code}).")
     total      = int(r.headers.get("content-length", 0))
     downloaded = 0
-    with open(YOLO_MODEL_PATH, "wb") as f:
+    with open(dest_path, "wb") as f:
         for chunk in r.iter_content(chunk_size=8192):
             f.write(chunk)
             downloaded += len(chunk)
             if progress_callback and total:
                 progress_callback(downloaded / total, downloaded / 1e6)
 
+# ============================================================
+# MODEL LOADERS
+# ============================================================
 
-def load_yolo_model():
+def load_yolo_model(progress_callback=None):
     from ultralytics import YOLO
-    download_yolo_if_needed()
+    download_from_hf(YOLO_HF_URL, YOLO_MODEL_PATH, "YOLO11", progress_callback)
     return YOLO(YOLO_MODEL_PATH)
 
 
-def load_ai_detector(model_path):
-    """Load NanoBananaDetector weights. Returns None if path invalid."""
-    if not model_path or not os.path.exists(model_path):
-        return None
+def load_ai_detector(progress_callback=None):
+    """Download and load NanoBananaDetector from HuggingFace."""
+    download_from_hf(CLASSIFIER_HF_URL, AI_MODEL_PATH, "Flux Classifier", progress_callback)
     model = NanoBananaDetector().to(DEVICE)
-    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.load_state_dict(torch.load(AI_MODEL_PATH, map_location=DEVICE))
     model.eval()
     return model
 
@@ -195,7 +199,6 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
         annotated_pil   : PIL.Image — annotated result image
         zip_buffer      : BytesIO   — ZIP of cropped detections
     """
-    # Resize to 640x640 for YOLO using Pillow
     img_resized = img_pil.convert("RGB").resize((640, 640), Image.BILINEAR)
     img_np      = np.array(img_resized)
 
@@ -215,7 +218,6 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
             "score":      score,
         })
 
-    # Pillow copy for annotation
     annotated_pil = img_resized.copy()
 
     zip_buffer = io.BytesIO()
@@ -223,7 +225,6 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
         for det in detections_list:
             x1, y1, x2, y2 = det["bbox"]
 
-            # Crop using Pillow
             crop_pil = img_resized.crop((
                 max(x1, 0), max(y1, 0),
                 min(x2, 640), min(y2, 640)
@@ -235,13 +236,11 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
                 det["crop_img"] = None
                 continue
 
-            # Save crop to ZIP
             zip_name = f"crop_{det['index']}_{det['class_name']}_{int(det['score']*100)}.jpg"
             zipf.writestr(zip_name, encode_jpg(crop_pil))
             det["zip_name"] = zip_name
             det["crop_img"] = crop_pil
 
-            # AI detection
             if ai_model is not None:
                 ai_result = detect_ai(crop_pil, ai_model)
             else:
@@ -250,7 +249,6 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
             det["ai_score"] = ai_result["score"]
             det["ai_like"]  = ai_result["ai_like"]
 
-            # Annotate with Pillow
             color = "#ff4444" if ai_result["ai_like"] else "#44cc88"
             label = f"{det['class_name']} {det['score']:.2f} | AI:{det['ai_score']:.2f}"
             draw_box_and_label(annotated_pil, x1, y1, x2, y2, label, color)
