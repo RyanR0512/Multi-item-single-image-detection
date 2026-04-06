@@ -1,14 +1,23 @@
 [project]
-name = "nanobanana"
+name = "fluxdetector"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "streamlit",
-    "torch",
-    "torchvision",
+    "torch==2.1.0",
+    "torchvision==0.16.0",
     "timm",
     "numpy",
     "Pillow",
     "requests",
     "ultralytics",
 ]
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
+
+[tool.poetry.dependencies]
+torch = {version = "2.1.0+cpu", source = "pytorch-cpu"}
+torchvision = {version = "0.16.0+cpu", source = "pytorch-cpu"}
