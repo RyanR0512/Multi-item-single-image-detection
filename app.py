@@ -102,7 +102,7 @@ def get_ai_model(model_path):
 # ============================================================
 st.markdown("""
 <div class="hero-header">
-    <div class="hero-title">Nano<span>Banana</span> Detector</div>
+    <div class="hero-title">Flux<span>AI</span> Detector</div>
     <div class="hero-sub">YOLO11 Object Detection · AI Image Analysis</div>
 </div>
 """, unsafe_allow_html=True)
