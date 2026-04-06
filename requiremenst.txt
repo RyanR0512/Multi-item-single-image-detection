@@ -1,9 +1,0 @@
-torch
-torchvision
-torchaudio
-timm
-ultralytics
-streamlit
-pillow
-numpy
-requests
