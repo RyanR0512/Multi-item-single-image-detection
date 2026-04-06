@@ -1,5 +1,13 @@
 import os
+
+import subprocess
 import streamlit as st
+
+st.text(subprocess.run(["python", "--version"], capture_output=True, text=True).stdout)
+st.text(subprocess.run(["pip", "list"], capture_output=True, text=True).stdout)
+st.stop()
+
+
 from PIL import Image
 import detection
 
