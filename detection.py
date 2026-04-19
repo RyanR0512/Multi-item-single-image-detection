@@ -200,7 +200,7 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
         zip_buffer      : BytesIO   — ZIP of cropped detections
     """
     img_resized = img_pil.convert("RGB").resize((640, 640), Image.BILINEAR)
-    img_np      = np.array(img_resized)
+    img_np = np.array(img_resized)[:, :, ::-1].copy()  # RGB -> BGR for YOLO
 
     results = yolo_model(img_np, conf=conf_threshold, verbose=False)[0]
 
