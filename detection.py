@@ -13,7 +13,7 @@ from PIL import Image, ImageFilter, ImageDraw
 # CONFIG
 # ============================================================
 YOLO_HF_URL       =  "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11n.pt"
-CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/flux_classifier_1-1000.pt"
+CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/flux_classifier.pt"
 YOLO_MODEL_PATH   = "yolo11n.pt"
 AI_MODEL_PATH     = "flux_classifier_1-1000.pt"
 IMG_SIZE          = 224
