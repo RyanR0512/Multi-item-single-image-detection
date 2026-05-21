@@ -125,7 +125,7 @@ with st.sidebar:
     st.markdown("""
     <div style="color:#666; font-size:0.8rem; line-height:1.6;">
     Upload any image to detect objects with <b style="color:#f5c542">YOLO11</b> and analyse
-    each crop with <b style="color:#f5c542">NanoBananaDetector</b> to determine whether
+    each crop with <b style="color:#f5c542">Flux_Classifier</b> to determine whether
     detected regions appear AI-generated or real.<br><br>
     🔴 Red box = likely AI-generated<br>
     🟢 Green box = likely real
