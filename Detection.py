@@ -12,12 +12,14 @@ from PIL import Image, ImageFilter, ImageDraw
 # ============================================================
 # CONFIG
 # ============================================================
-YOLO_HF_URL       =  "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11n.pt"
-CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/flux_classifier.pt"
-YOLO_MODEL_PATH   = "yolo11n.pt"
-AI_MODEL_PATH     = "flux_classifier.pt"
-IMG_SIZE          = 224
-DEVICE            = "cuda" if torch.cuda.is_available() else "cpu"
+YOLO_HF_URL = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/yolo11n.pt"
+CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/best_model.pt"
+YOLO_MODEL_PATH = "yolo11_detector.pt"
+AI_MODEL_PATH = "flux_classifier.pt"
+IMG_SIZE = 224
+YOLO_IMAGE_SIZE = 640
+AI_THRESHOLD = 0.5
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================
 # TRANSFORMS
@@ -25,12 +27,13 @@ DEVICE            = "cuda" if torch.cuda.is_available() else "cpu"
 rgb_transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
 ])
 
 # ============================================================
 # CV2 REPLACEMENTS (Pillow + numpy only)
 # ============================================================
+
 
 def pil_resize(img_np, w, h):
     """Resize a numpy array (H,W,C) or (H,W) to (h, w) using Pillow."""
@@ -38,10 +41,10 @@ def pil_resize(img_np, w, h):
         pil = Image.fromarray(img_np.astype(np.float32))
         pil = pil.resize((w, h), Image.BILINEAR)
         return np.array(pil)
-    else:
-        pil = Image.fromarray(img_np.astype(np.uint8))
-        pil = pil.resize((w, h), Image.BILINEAR)
-        return np.array(pil)
+
+    pil = Image.fromarray(img_np.astype(np.uint8))
+    pil = pil.resize((w, h), Image.BILINEAR)
+    return np.array(pil)
 
 
 def rgb_to_gray(img_rgb_np):
@@ -55,14 +58,14 @@ def rgb_to_gray(img_rgb_np):
 
 def gaussian_blur(img_rgb_np, radius=2):
     """Apply Gaussian blur to an RGB numpy array using Pillow."""
-    pil     = Image.fromarray(img_rgb_np.astype(np.uint8))
+    pil = Image.fromarray(img_rgb_np.astype(np.uint8))
     blurred = pil.filter(ImageFilter.GaussianBlur(radius=radius))
     return np.array(blurred).astype(np.float32)
 
 
 def draw_box_and_label(img_pil, x1, y1, x2, y2, label, color):
     """Draw bounding box and label onto a PIL image in-place."""
-    draw   = ImageDraw.Draw(img_pil)
+    draw = ImageDraw.Draw(img_pil)
     draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
     text_y = max(y1 - 16, 0)
     draw.text((x1, text_y), label, fill=color)
@@ -78,20 +81,21 @@ def encode_jpg(img_pil):
 # FEATURE FUNCTIONS (no cv2)
 # ============================================================
 
+
 def fft_features(img_rgb_np):
     """Compute FFT magnitude spectrum from an RGB numpy array."""
-    gray   = rgb_to_gray(img_rgb_np)
-    f      = np.fft.fft2(gray)
+    gray = rgb_to_gray(img_rgb_np)
+    f = np.fft.fft2(gray)
     fshift = np.fft.fftshift(f)
-    mag    = np.log(np.abs(fshift) + 1.0)
-    mag    = pil_resize(mag, IMG_SIZE, IMG_SIZE)
-    mag    = np.repeat(mag[np.newaxis, ...], 3, axis=0)
+    mag = np.log(np.abs(fshift) + 1.0)
+    mag = pil_resize(mag, IMG_SIZE, IMG_SIZE)
+    mag = np.repeat(mag[np.newaxis, ...], 3, axis=0)
     return torch.tensor(mag, dtype=torch.float32)
 
 
 def noise_residual(img_rgb_np):
     """Compute noise residual (image minus Gaussian blur)."""
-    blur     = gaussian_blur(img_rgb_np, radius=2)
+    blur = gaussian_blur(img_rgb_np, radius=2)
     residual = img_rgb_np.astype(np.float32) - blur
     residual = pil_resize(residual.astype(np.uint8), IMG_SIZE, IMG_SIZE)
     residual = torch.tensor(residual).permute(2, 0, 1) / 255.0
@@ -101,23 +105,24 @@ def noise_residual(img_rgb_np):
 # MODEL ARCHITECTURE
 # ============================================================
 
+
 class NanoBananaDetector(nn.Module):
     def __init__(self):
         super().__init__()
-        self.rgb_net   = timm.create_model("convnext_base", pretrained=False, num_classes=0)
-        self.fft_net   = timm.create_model("resnet18",      pretrained=False, num_classes=0)
-        self.noise_net = timm.create_model("resnet18",      pretrained=False, num_classes=0)
+        self.rgb_net = timm.create_model("convnext_base", pretrained=False, num_classes=0)
+        self.fft_net = timm.create_model("resnet18", pretrained=False, num_classes=0)
+        self.noise_net = timm.create_model("resnet18", pretrained=False, num_classes=0)
         self.classifier = nn.Sequential(
             nn.Linear(1024 + 512 + 512, 512),
             nn.ReLU(),
             nn.Dropout(0.4),
-            nn.Linear(512, 1)
+            nn.Linear(512, 1),
         )
 
     def forward(self, rgb, fft, noise):
-        f1    = self.rgb_net(rgb)
-        f2    = self.fft_net(fft)
-        f3    = self.noise_net(noise)
+        f1 = self.rgb_net(rgb)
+        f2 = self.fft_net(fft)
+        f3 = self.noise_net(noise)
         feats = torch.cat([f1, f2, f3], dim=1)
         return self.classifier(feats).squeeze(1)
 
@@ -125,15 +130,18 @@ class NanoBananaDetector(nn.Module):
 # DOWNLOAD HELPER
 # ============================================================
 
+
 def download_from_hf(url, dest_path, label, progress_callback=None):
     """Download a model from HuggingFace if not already present."""
     if os.path.exists(dest_path):
         return
-    headers    = {"User-Agent": "Mozilla/5.0"}
-    r          = requests.get(url, stream=True, headers=headers, allow_redirects=True)
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    r = requests.get(url, stream=True, headers=headers, allow_redirects=True)
     if r.status_code != 200:
         raise RuntimeError(f"Failed to download {label} (HTTP {r.status_code}).")
-    total      = int(r.headers.get("content-length", 0))
+
+    total = int(r.headers.get("content-length", 0))
     downloaded = 0
     with open(dest_path, "wb") as f:
         for chunk in r.iter_content(chunk_size=8192):
@@ -146,8 +154,10 @@ def download_from_hf(url, dest_path, label, progress_callback=None):
 # MODEL LOADERS
 # ============================================================
 
+
 def load_yolo_model(progress_callback=None):
     from ultralytics import YOLO
+
     download_from_hf(YOLO_HF_URL, YOLO_MODEL_PATH, "YOLO11", progress_callback)
     return YOLO(YOLO_MODEL_PATH)
 
@@ -161,61 +171,84 @@ def load_ai_detector(progress_callback=None):
     return model
 
 # ============================================================
-# AI DETECTION ON A SINGLE CROP
+# AI DETECTION
 # ============================================================
 
-def detect_ai(crop_pil, ai_model):
-    """Run AI classifier on a PIL crop. Returns score and ai_like flag."""
-    img_np = np.array(crop_pil.convert("RGB"))
 
-    rgb   = rgb_transform(crop_pil).unsqueeze(0).to(DEVICE)
-    fft   = fft_features(img_np).unsqueeze(0).to(DEVICE)
+def detect_ai(image_pil, ai_model, threshold=AI_THRESHOLD):
+    """
+    Run AI classifier on a PIL image.
+
+    This works for both object crops and the full image. The model input is
+    resized internally to IMG_SIZE by rgb_transform and the feature functions.
+    """
+    image_rgb = image_pil.convert("RGB")
+    img_np = np.array(image_rgb)
+
+    rgb = rgb_transform(image_rgb).unsqueeze(0).to(DEVICE)
+    fft = fft_features(img_np).unsqueeze(0).to(DEVICE)
     noise = noise_residual(img_np).unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
         logit = ai_model(rgb, fft, noise)
-        prob  = torch.sigmoid(logit).item()
+        prob = torch.sigmoid(logit).item()
 
-    return {"score": prob, "ai_like": prob > 0.5}
+    return {"score": prob, "ai_like": prob > threshold}
+
+
+def empty_ai_result():
+    return {"score": 0.0, "ai_like": False}
 
 # ============================================================
 # MAIN PIPELINE
 # ============================================================
 
+
 def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
     """
-    Run YOLO detection + AI classification on a PIL image.
+    Run YOLO detection plus AI classification on a PIL image.
 
     Args:
-        img_pil        : PIL.Image  — the uploaded image
-        yolo_model     : loaded YOLO model (from load_yolo_model)
+        img_pil        : PIL.Image - uploaded image
+        yolo_model     : loaded YOLO model from load_yolo_model
         ai_model       : loaded NanoBananaDetector or None
-        conf_threshold : float — YOLO confidence cutoff
+        conf_threshold : float - YOLO confidence cutoff
 
     Returns:
         detections_list : list of dicts with keys:
                           index, bbox, class_id, class_name, score,
                           ai_score, ai_like, crop_img, zip_name
-        annotated_pil   : PIL.Image — annotated result image
-        zip_buffer      : BytesIO   — ZIP of cropped detections
+        annotated_pil   : PIL.Image - annotated result image
+        zip_buffer      : BytesIO - ZIP of cropped detections
+        full_image_ai   : dict with score and ai_like for the whole image
     """
-    img_resized = img_pil.convert("RGB").resize((640, 640), Image.BILINEAR)
-    img_np = np.array(img_resized)[:, :, ::-1].copy()  # RGB -> BGR for YOLO
+    img_resized = img_pil.convert("RGB").resize(
+        (YOLO_IMAGE_SIZE, YOLO_IMAGE_SIZE),
+        Image.BILINEAR,
+    )
+    img_np = np.array(img_resized)
+
+    # Whole-image AI pass. This is independent of YOLO and runs even when
+    # no objects are detected.
+    if ai_model is not None:
+        full_image_ai = detect_ai(img_resized, ai_model)
+    else:
+        full_image_ai = empty_ai_result()
 
     results = yolo_model(img_np, conf=conf_threshold, verbose=False)[0]
 
     detections_list = []
     for i, box in enumerate(results.boxes):
         x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-        score      = float(box.conf[0])
-        class_id   = int(box.cls[0])
+        score = float(box.conf[0])
+        class_id = int(box.cls[0])
         class_name = yolo_model.names.get(class_id, f"Class {class_id}")
         detections_list.append({
-            "index":      i,
-            "bbox":       [x1, y1, x2, y2],
-            "class_id":   class_id,
+            "index": i,
+            "bbox": [x1, y1, x2, y2],
+            "class_id": class_id,
             "class_name": class_name,
-            "score":      score,
+            "score": score,
         })
 
     annotated_pil = img_resized.copy()
@@ -226,17 +259,26 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
             x1, y1, x2, y2 = det["bbox"]
 
             crop_pil = img_resized.crop((
-                max(x1, 0), max(y1, 0),
-                min(x2, 640), min(y2, 640)
+                max(x1, 0),
+                max(y1, 0),
+                min(x2, YOLO_IMAGE_SIZE),
+                min(y2, YOLO_IMAGE_SIZE),
             ))
 
             if crop_pil.width == 0 or crop_pil.height == 0:
                 det["ai_score"] = 0.0
-                det["ai_like"]  = False
+                det["ai_like"] = False
                 det["crop_img"] = None
                 continue
 
-            zip_name = f"crop_{det['index']}_{det['class_name']}_{int(det['score']*100)}.jpg"
+            safe_class_name = "".join(
+                c if c.isalnum() or c in ("-", "_") else "_"
+                for c in det["class_name"]
+            )
+            zip_name = (
+                f"crop_{det['index']}_{safe_class_name}_"
+                f"{int(det['score'] * 100)}.jpg"
+            )
             zipf.writestr(zip_name, encode_jpg(crop_pil))
             det["zip_name"] = zip_name
             det["crop_img"] = crop_pil
@@ -244,14 +286,14 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
             if ai_model is not None:
                 ai_result = detect_ai(crop_pil, ai_model)
             else:
-                ai_result = {"score": 0.0, "ai_like": False}
+                ai_result = empty_ai_result()
 
             det["ai_score"] = ai_result["score"]
-            det["ai_like"]  = ai_result["ai_like"]
+            det["ai_like"] = ai_result["ai_like"]
 
             color = "#ff4444" if ai_result["ai_like"] else "#44cc88"
             label = f"{det['class_name']} {det['score']:.2f} | AI:{det['ai_score']:.2f}"
             draw_box_and_label(annotated_pil, x1, y1, x2, y2, label, color)
 
     zip_buffer.seek(0)
-    return detections_list, annotated_pil, zip_buffer
+    return detections_list, annotated_pil, zip_buffer, full_image_ai
