@@ -138,7 +138,7 @@ def render_ai_summary(title, result):
     bar_pct = max(0, min(100, int(score * 100)))
 
     st.markdown(
-        """
+        f"""
         <div class="whole-card {row_cls}">
             <div class="whole-top">
                 <div>
@@ -304,7 +304,7 @@ with col_right:
                 bar_pct = max(0, min(100, int(ai_score * 100)))
 
                 st.markdown(
-                    """
+                    f"""
                 <div class="det-row {row_cls}">
                     <div>
                         <div class="det-label">#{det['index'] + 1} {det['class_name']}</div>
