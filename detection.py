@@ -77,6 +77,7 @@ def encode_jpg(img_pil):
     img_pil.save(buf, format="JPEG", quality=90)
     return buf.getvalue()
 
+
 # ============================================================
 # FEATURE FUNCTIONS (no cv2)
 # ============================================================
@@ -101,30 +102,155 @@ def noise_residual(img_rgb_np):
     residual = torch.tensor(residual).permute(2, 0, 1) / 255.0
     return residual.float()
 
+
 # ============================================================
 # MODEL ARCHITECTURE
 # ============================================================
 
 
 class NanoBananaDetector(nn.Module):
-    def __init__(self):
+    def __init__(
+        self,
+        rgb_backbone="convnext_tiny",
+        rgb_features=768,
+        use_branch_bn=True,
+        classifier_linear_shapes=None,
+        classifier_bn_after_first=True,
+    ):
         super().__init__()
-        self.rgb_net = timm.create_model("convnext_base", pretrained=False, num_classes=0)
+        self.rgb_net = timm.create_model(rgb_backbone, pretrained=False, num_classes=0)
         self.fft_net = timm.create_model("resnet18", pretrained=False, num_classes=0)
         self.noise_net = timm.create_model("resnet18", pretrained=False, num_classes=0)
-        self.classifier = nn.Sequential(
-            nn.Linear(1024 + 512 + 512, 512),
-            nn.ReLU(),
-            nn.Dropout(0.4),
-            nn.Linear(512, 1),
+        self.use_branch_bn = use_branch_bn
+
+        if use_branch_bn:
+            self.rgb_bn = nn.BatchNorm1d(rgb_features)
+            self.fft_bn = nn.BatchNorm1d(512)
+            self.noise_bn = nn.BatchNorm1d(512)
+
+        if classifier_linear_shapes is None:
+            classifier_linear_shapes = {
+                0: (rgb_features + 512 + 512, 512),
+                4: (512, 128),
+                7: (128, 1),
+            }
+
+        self.classifier = self._build_classifier(
+            classifier_linear_shapes,
+            classifier_bn_after_first,
+        )
+
+    @staticmethod
+    def _build_classifier(linear_shapes, bn_after_first):
+        linear_indices = sorted(linear_shapes)
+
+        if linear_indices == [0, 3]:
+            in_0, out_0 = linear_shapes[0]
+            in_3, out_3 = linear_shapes[3]
+            return nn.Sequential(
+                nn.Linear(in_0, out_0),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(in_3, out_3),
+            )
+
+        if linear_indices == [0, 4, 7]:
+            in_0, out_0 = linear_shapes[0]
+            in_4, out_4 = linear_shapes[4]
+            in_7, out_7 = linear_shapes[7]
+            norm_or_identity = nn.BatchNorm1d(out_0) if bn_after_first else nn.Identity()
+            return nn.Sequential(
+                nn.Linear(in_0, out_0),
+                norm_or_identity,
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(in_4, out_4),
+                nn.ReLU(),
+                nn.Dropout(0.4),
+                nn.Linear(in_7, out_7),
+            )
+
+        raise RuntimeError(
+            f"Unsupported classifier layout in checkpoint: linear layers {linear_indices}"
         )
 
     def forward(self, rgb, fft, noise):
         f1 = self.rgb_net(rgb)
         f2 = self.fft_net(fft)
         f3 = self.noise_net(noise)
+
+        if self.use_branch_bn:
+            f1 = self.rgb_bn(f1)
+            f2 = self.fft_bn(f2)
+            f3 = self.noise_bn(f3)
+
         feats = torch.cat([f1, f2, f3], dim=1)
         return self.classifier(feats).squeeze(1)
+
+
+def normalize_state_dict(checkpoint):
+    """Handle raw state_dicts and common checkpoint wrapper formats."""
+    if isinstance(checkpoint, dict):
+        for key in ("state_dict", "model_state_dict", "model"):
+            if key in checkpoint and isinstance(checkpoint[key], dict):
+                checkpoint = checkpoint[key]
+                break
+
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError("Classifier checkpoint is not a valid state_dict.")
+
+    normalized = {}
+    for key, value in checkpoint.items():
+        if key.startswith("module."):
+            key = key[len("module."):]
+        normalized[key] = value
+    return normalized
+
+
+def infer_detector_config(state_dict):
+    """
+    Infer the detector architecture from the checkpoint.
+
+    The currently published flux-classifier checkpoint uses ConvNeXt Tiny
+    dimensions, branch BatchNorm layers, and a deeper classifier head.
+    """
+    stem_weight = state_dict.get("rgb_net.stem.0.weight")
+    if stem_weight is None:
+        raise RuntimeError("Checkpoint is missing rgb_net.stem.0.weight.")
+
+    stem_width = int(stem_weight.shape[0])
+    if stem_width == 96:
+        rgb_backbone = "convnext_tiny"
+        rgb_features = 768
+    elif stem_width == 128:
+        rgb_backbone = "convnext_base"
+        rgb_features = 1024
+    else:
+        raise RuntimeError(
+            f"Unsupported ConvNeXt stem width {stem_width}; cannot infer RGB backbone."
+        )
+
+    classifier_linear_shapes = {}
+    for key, value in state_dict.items():
+        if not key.startswith("classifier.") or not key.endswith(".weight"):
+            continue
+        parts = key.split(".")
+        if len(parts) != 3 or not parts[1].isdigit() or value.ndim != 2:
+            continue
+        out_features, in_features = value.shape
+        classifier_linear_shapes[int(parts[1])] = (
+            int(in_features),
+            int(out_features),
+        )
+
+    return {
+        "rgb_backbone": rgb_backbone,
+        "rgb_features": rgb_features,
+        "use_branch_bn": "rgb_bn.weight" in state_dict,
+        "classifier_linear_shapes": classifier_linear_shapes,
+        "classifier_bn_after_first": "classifier.1.weight" in state_dict,
+    }
+
 
 # ============================================================
 # DOWNLOAD HELPER
@@ -150,6 +276,7 @@ def download_from_hf(url, dest_path, label, progress_callback=None):
             if progress_callback and total:
                 progress_callback(downloaded / total, downloaded / 1e6)
 
+
 # ============================================================
 # MODEL LOADERS
 # ============================================================
@@ -165,10 +292,13 @@ def load_yolo_model(progress_callback=None):
 def load_ai_detector(progress_callback=None):
     """Download and load NanoBananaDetector from HuggingFace."""
     download_from_hf(CLASSIFIER_HF_URL, AI_MODEL_PATH, "Flux Classifier", progress_callback)
-    model = NanoBananaDetector().to(DEVICE)
-    model.load_state_dict(torch.load(AI_MODEL_PATH, map_location=DEVICE))
+    checkpoint = torch.load(AI_MODEL_PATH, map_location=DEVICE)
+    state_dict = normalize_state_dict(checkpoint)
+    model = NanoBananaDetector(**infer_detector_config(state_dict)).to(DEVICE)
+    model.load_state_dict(state_dict)
     model.eval()
     return model
+
 
 # ============================================================
 # AI DETECTION
@@ -199,6 +329,7 @@ def detect_ai(image_pil, ai_model, threshold=AI_THRESHOLD):
 def empty_ai_result():
     return {"score": 0.0, "ai_like": False}
 
+
 # ============================================================
 # MAIN PIPELINE
 # ============================================================
@@ -207,20 +338,6 @@ def empty_ai_result():
 def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
     """
     Run YOLO detection plus AI classification on a PIL image.
-
-    Args:
-        img_pil        : PIL.Image - uploaded image
-        yolo_model     : loaded YOLO model from load_yolo_model
-        ai_model       : loaded NanoBananaDetector or None
-        conf_threshold : float - YOLO confidence cutoff
-
-    Returns:
-        detections_list : list of dicts with keys:
-                          index, bbox, class_id, class_name, score,
-                          ai_score, ai_like, crop_img, zip_name
-        annotated_pil   : PIL.Image - annotated result image
-        zip_buffer      : BytesIO - ZIP of cropped detections
-        full_image_ai   : dict with score and ai_like for the whole image
     """
     img_resized = img_pil.convert("RGB").resize(
         (YOLO_IMAGE_SIZE, YOLO_IMAGE_SIZE),
@@ -228,8 +345,6 @@ def run_detection(img_pil, yolo_model, ai_model, conf_threshold=0.25):
     )
     img_np = np.array(img_resized)
 
-    # Whole-image AI pass. This is independent of YOLO and runs even when
-    # no objects are detected.
     if ai_model is not None:
         full_image_ai = detect_ai(img_resized, ai_model)
     else:
