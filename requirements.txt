@@ -1,4 +1,5 @@
 streamlit
+streamlit
 torch==2.9.0
 torchvision
 timm
@@ -6,3 +7,4 @@ numpy
 Pillow
 requests
 ultralytics
+opencv-python-headless
