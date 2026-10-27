@@ -18,7 +18,7 @@ CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/ma
 YOLO_MODEL_PATH = "yolo11_detector.pt"
 AI_MODEL_PATH = "flux_classifier.pt"
 IMG_SIZE = features.IMG_SIZE
-YOLO_IMAGE_SIZE = 640
+YOLO_IMAGE_SIZE = 512
 AI_THRESHOLD = 0.5
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
