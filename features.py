@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torchvision import transforms
 
-IMG_SIZE = 224
+IMG_SIZE = 512
 _normalize = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 
 
