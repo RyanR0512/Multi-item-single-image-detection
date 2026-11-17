@@ -14,7 +14,7 @@ import features
 # CONFIG
 # ============================================================
 YOLO_HF_URL = "https://huggingface.co/RyanR0512/Yolov11-detector/resolve/main/best.pt"
-CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/best_f1_state_dict.pt"
+CLASSIFIER_HF_URL = "https://huggingface.co/RyanR0512/flux-classifier/resolve/main/best_f1.pt"
 YOLO_MODEL_PATH = "yolo11_detector.pt"
 AI_MODEL_PATH = "flux_classifier.pt"
 IMG_SIZE = features.IMG_SIZE
